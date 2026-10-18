@@ -1,0 +1,61 @@
+// Run with a running Snaplist server. npm run test:ui
+import { chromium } from '@playwright/test';
+import serverlessChromium from '@sparticuz/chromium';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { brotliDecompressSync } from 'node:zlib';
+import { execFileSync } from 'node:child_process';
+
+// Use the npm-distributed Chromium so restricted-network environments need no CDN.
+const libDir = path.join(os.tmpdir(), 'snaplist-browser-libs');
+await fs.mkdir(libDir, { recursive: true });
+const archive = path.join(libDir, 'al2023.tar');
+await fs.writeFile(archive, brotliDecompressSync(await fs.readFile(new URL('../node_modules/@sparticuz/chromium/bin/al2023.tar.br', import.meta.url))));
+execFileSync('tar', ['-xf', archive, '-C', libDir]);
+const browser = await chromium.launch({ executablePath: await serverlessChromium.executablePath(), args: serverlessChromium.args, headless: true, env: { ...process.env, LD_LIBRARY_PATH: `${libDir}/lib:${process.env.LD_LIBRARY_PATH || ''}` } });
+try {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto(process.env.TEST_URL || 'http://127.0.0.1:3000');
+  assert.match(await page.title(), /Snaplist/);
+  assert.ok(await page.locator('svg').count() > 20);
+  await page.locator('#generate').click();
+  await page.waitForFunction(() => document.querySelector('#source-label').textContent.includes('NOT AI GENERATED'));
+  await page.locator('#save-listing').click();
+  await page.waitForFunction(() => document.querySelector('#saved-count').textContent === '1');
+  await page.locator('[data-view="library"]').click();
+  assert.equal(await page.locator('.library-card').count(), 1);
+  await page.locator('[data-open]').click();
+  await page.locator('[data-platform="eBay"]').click();
+  assert.equal(await page.locator('#marketplace-label').textContent(), 'MADE FOR EBAY');
+  await page.locator('#tag-input').fill('weekend carry'); await page.locator('#add-tag').click();
+  assert.match(await page.locator('#tags').textContent(), /weekend carry/);
+  const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#download').click()]);
+  assert.equal(download.suggestedFilename(), 'snaplist-ebay-listing.txt');
+  await page.reload();
+  assert.equal(await page.locator('#saved-count').textContent(), '1');
+  await page.locator('#file-input').setInputFiles('public/tote-studio.png');
+  await page.waitForFunction(() => document.querySelector('#source-label').textContent === 'READY TO GENERATE');
+  assert.equal(await page.locator('#notes').inputValue(), '');
+  await page.locator('#generate').click();
+  await page.waitForFunction(() => !document.querySelector('#generate').disabled);
+  assert.match(await page.locator('#listing-description').inputValue(), /not an analysis/);
+  await page.locator('#settings-button').click();
+  await page.waitForFunction(() => !document.querySelector('#connection-status').textContent.includes('Checking'));
+  assert.ok(await page.locator('#settings-dialog').isVisible());
+  await page.locator('input[value="local"]').check();
+  await page.locator('#settings-dialog button[value="save"]').click();
+  await page.waitForFunction(() => document.querySelector('#generation-note').textContent.includes('Local inference'));
+  assert.match(await page.locator('#generation-note').textContent(), /Local inference/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+  await fs.mkdir('.arena', { recursive: true });
+  await page.screenshot({ path: '.arena/mobile.png', fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.reload();
+  await page.screenshot({ path: '.arena/desktop.png', fullPage: true });
+  assert.deepEqual(errors, []);
+  console.log('Passed: render, demo generation, save/edit, persistence, marketplace, tags, export, uploads, mode settings, and mobile overflow. No browser errors.');
+} finally { await browser.close(); }
